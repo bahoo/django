@@ -68,7 +68,7 @@ class RenameChangeListMethods(RenameMethodsBase):
 class ChangeList(six.with_metaclass(RenameChangeListMethods)):
     def __init__(self, request, model, list_display, list_display_links,
             list_filter, date_hierarchy, search_fields, list_select_related,
-            list_per_page, list_max_show_all, list_editable, model_admin):
+            list_annotate, list_per_page, list_max_show_all, list_editable, model_admin):
         self.model = model
         self.opts = model._meta
         self.lookup_opts = self.opts
@@ -79,6 +79,7 @@ class ChangeList(six.with_metaclass(RenameChangeListMethods)):
         self.date_hierarchy = date_hierarchy
         self.search_fields = search_fields
         self.list_select_related = list_select_related
+        self.list_annotate = list_annotate
         self.list_per_page = list_per_page
         self.list_max_show_all = list_max_show_all
         self.model_admin = model_admin
@@ -271,8 +272,11 @@ class ChangeList(six.with_metaclass(RenameChangeListMethods)):
                 attr = field_name
             elif hasattr(self.model_admin, field_name):
                 attr = getattr(self.model_admin, field_name)
-            else:
+            elif hasattr(self.model, field_name):
                 attr = getattr(self.model, field_name)
+            else:
+                # this is a bit of a leap, for list_annotate fields
+                return field_name
             return getattr(attr, 'admin_order_field', None)
 
     def get_ordering(self, request, queryset):
@@ -385,6 +389,9 @@ class ChangeList(six.with_metaclass(RenameChangeListMethods)):
         if not qs.query.select_related:
             qs = self.apply_select_related(qs)
 
+        if not qs.query.aggregates:
+            qs = self.apply_annotate(qs)
+
         # Set ordering.
         ordering = self.get_ordering(request, qs)
         qs = qs.order_by(*ordering)
@@ -410,6 +417,12 @@ class ChangeList(six.with_metaclass(RenameChangeListMethods)):
         if self.list_select_related:
             return qs.select_related(*self.list_select_related)
         return qs
+
+    def apply_annotate(self, qs):
+        if not self.list_annotate:
+            return qs
+        else:
+            return qs.annotate(*self.list_annotate)
 
     def has_related_field_in_list_display(self):
         for field_name in self.list_display:

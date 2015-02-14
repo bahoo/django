@@ -317,6 +317,10 @@ def label_for_field(name, model, model_admin=None, return_attr=False):
                 attr = getattr(model_admin, name)
             elif hasattr(model, name):
                 attr = getattr(model, name)
+            elif model_admin.list_annotate:
+                for annotation in model_admin.list_annotate:
+                    if hasattr(annotation, name):
+                        attr = name
             else:
                 message = "Unable to lookup '%s' on %s" % (name, model._meta.object_name)
                 if model_admin:

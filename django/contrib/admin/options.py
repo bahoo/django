@@ -519,6 +519,7 @@ class ModelAdmin(BaseModelAdmin):
     list_display_links = ()
     list_filter = ()
     list_select_related = False
+    list_annotate = []
     list_per_page = 100
     list_max_show_all = 200
     list_editable = ()
@@ -921,6 +922,13 @@ class ModelAdmin(BaseModelAdmin):
         the right sidebar of the changelist page.
         """
         return self.list_filter
+
+    def get_list_annotate(self, request):
+        """
+        Returns a sequence containing the fields to be annotated to the
+        queryset of the changelist page.
+        """
+        return self.list_annotate
 
     def get_search_fields(self, request):
         """
@@ -1469,6 +1477,7 @@ class ModelAdmin(BaseModelAdmin):
         list_display = self.get_list_display(request)
         list_display_links = self.get_list_display_links(request, list_display)
         list_filter = self.get_list_filter(request)
+        list_annotate = self.get_list_annotate(request)
         search_fields = self.get_search_fields(request)
 
         # Check actions to see if any are available on this changelist
@@ -1481,8 +1490,8 @@ class ModelAdmin(BaseModelAdmin):
         try:
             cl = ChangeList(request, self.model, list_display,
                 list_display_links, list_filter, self.date_hierarchy,
-                search_fields, self.list_select_related, self.list_per_page,
-                self.list_max_show_all, self.list_editable, self)
+                search_fields, self.list_select_related, list_annotate,
+                self.list_per_page, self.list_max_show_all, self.list_editable, self)
 
         except IncorrectLookupParameters:
             # Wacky lookup parameters were given, so redirect to the main

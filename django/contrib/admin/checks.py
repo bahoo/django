@@ -493,6 +493,7 @@ class ModelAdminChecks(BaseModelAdminChecks):
         errors.extend(self._check_list_display_links(cls, model))
         errors.extend(self._check_list_filter(cls, model))
         errors.extend(self._check_list_select_related(cls, model))
+        errors.extend(self._check_list_annotate(cls, model))
         errors.extend(self._check_list_per_page(cls, model))
         errors.extend(self._check_list_max_show_all(cls, model))
         errors.extend(self._check_list_editable(cls, model))
@@ -608,6 +609,26 @@ class ModelAdminChecks(BaseModelAdminChecks):
                 ]
             else:
                 return []
+        elif getattr(cls, 'list_annotate') != []:
+            try:
+                model._meta.get_field_by_name(item)
+                return []
+            except models.FieldDoesNotExist:
+                for annotation in cls.list_annotate:
+                    if annotation.default_alias == item:
+                        return []
+                return [
+                    # This is a deliberate repeat of E108; there's more than one path
+                    # required to test this condition.
+                    checks.Error(
+                        "The value of '%s' refers to '%s', which is not a callable, an attribute of '%s', or an attribute or method on '%s.%s'." % (
+                            label, item, cls.__name__, model._meta.app_label, model._meta.object_name
+                        ),
+                        hint=None,
+                        obj=cls,
+                        id='admin.E108',
+                    )
+                ]
         else:
             try:
                 model._meta.get_field(item)
@@ -727,6 +748,48 @@ class ModelAdminChecks(BaseModelAdminChecks):
             return must_be('a boolean, tuple or list', option='list_select_related',
                            obj=cls, id='admin.E117')
         else:
+            return []
+
+    def _check_list_annotate(self, cls, model):
+        """ Check that list_annotate is a list. """
+
+        if not isinstance(cls.list_annotate, (list)):
+            return must_be('a list', option='list_annotate',
+                           obj=cls, id='admin.E117')
+        else:
+            return list(chain(*[
+                self._check_list_annotate_item(cls, model, item, "list_annotate[%s]" % index)
+                for index, item in enumerate(cls.list_annotate)
+            ]))
+
+    def _check_list_annotate_item(self, cls, model, item, label):
+
+        from django.db.models.aggregates import Aggregate
+
+        if not isinstance(item, Aggregate):
+            return must_inherit_from(parent='Aggregate', option=label,
+                                     obj=cls, id='admin.E129')
+        else:
+            try:
+                field = model._meta.get_field_by_name(item.lookup)
+            except:
+                return [
+                            checks.Error(
+                                "The value of '%s' refers to '%s' which is an invalid aggregate lookup on %s." % (label, item.lookup, model.__name__),
+                                hint=None,
+                                obj=cls,
+                                id='admin.E130',
+                            )
+                        ]
+            if not (isinstance(field[0], models.ManyToManyField) or isinstance(field[0], models.related.RelatedObject)):
+                return [
+                            checks.Error(
+                                "list_annotate '%s' must be a ManyToManyField or a related object on '%s' model." % (item, model),
+                                hint=None,
+                                obj=cls,
+                                id='admin.E131',
+                            )
+                        ]
             return []
 
     def _check_list_per_page(self, cls, model):

@@ -123,6 +123,8 @@ Minor features
   allow filtering geometries by the number of dimensions on PostGIS and
   SpatiaLite.
 
+* The GDAL library and its functions are now loaded lazily.
+
 :mod:`django.contrib.messages`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -371,6 +373,11 @@ System checks
 
 * The :djadmin:`check` management command now supplies all ``databases`` if not
   specified. Callers should be prepared for databases to be accessed.
+* The undocumented factory functions in
+  ``django.contrib.gis.gdal.prototypes.generation`` were replaced by
+  class-based factories following a naming pattern where lowercase snake_case
+  names became PascalCase (e.g., ``bool_output`` is now ``BoolOutput``,
+  ``const_string_output`` is now ``ConstStringOutput``, etc.).
 
 Dropped support for PostgreSQL 14
 ---------------------------------

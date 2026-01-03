@@ -37,6 +37,12 @@ determine the result's field type, such as complex expressions that mix field
 types. For example, adding a ``DecimalField()`` and a ``FloatField()`` requires
 an output field, like ``output_field=FloatField()``.
 
+``output_field`` also allows using custom fields that perform type conversions
+outside a specific model field context. For example, if you frequently need to
+perform date arithmetic with ``timedelta``, you can create a custom field that
+handles the conversion, ensuring consistent results across databases. See
+:doc:`/howto/custom-model-fields`.
+
 Some examples
 =============
 
@@ -111,6 +117,8 @@ Built-in Expressions
     ``django.db.models.aggregates``, but for convenience they're available and
     usually imported from :mod:`django.db.models`.
 
+.. _f-expressions:
+
 ``F()`` expressions
 -------------------
 
@@ -182,8 +190,8 @@ Slicing ``F()`` expressions
 
 For string-based fields, text-based fields, and
 :class:`~django.contrib.postgres.fields.ArrayField`, you can use Python's
-array-slicing syntax. The indices are 0-based and the ``step`` argument to
-``slice`` is not supported. For example:
+array-slicing syntax. The indices are 0-based. The ``step`` argument to
+``slice`` and negative indexing are not supported. For example:
 
 .. code-block:: pycon
 
@@ -426,6 +434,16 @@ replace the attributes of the same name without having to define your own
 class. :ref:`output_field<output-field>` can be used to define the expected
 return type.
 
+.. admonition:: Sanitize input used to configure a query expression
+
+    Built-in database functions (such as
+    :class:`~django.db.models.functions.Cast`) vary in whether arguments such
+    as ``output_field`` can be supplied positionally or only by keyword. For
+    ``output_field`` and several other cases, the input ultimately reaches
+    ``Func()`` as a keyword argument, so the advice to avoid constructing
+    keyword arguments from untrusted user input applies as equally to these
+    arguments as it does to ``**extra``.
+
 ``Aggregate()`` expressions
 ---------------------------
 
@@ -493,7 +511,7 @@ should be invoked for each distinct value of ``expressions`` (or set of
 values, for multiple ``expressions``). The argument is only supported on
 aggregates that have :attr:`~Aggregate.allow_distinct` set to ``True``.
 
-The ``filter`` argument takes a :class:`Q object <django.db.models.Q>` that's
+The ``filter`` argument takes a :ref:`Q object <q-objects>` that's
 used to filter the rows that are aggregated. See :ref:`conditional-aggregation`
 and :ref:`filtering-on-annotations` for example usage.
 
@@ -572,6 +590,24 @@ properties, such as :ref:`output_field<output-field>`, that may not be
 available on other expressions. ``ExpressionWrapper`` is necessary when using
 arithmetic on ``F()`` expressions with different types as described in
 :ref:`using-f-with-annotations`.
+
+.. admonition:: Database casting not performed
+
+    ``ExpressionWrapper`` only sets the output field for the ORM and does not
+    perform any database-level casting. To ensure a specific type is returned
+    from the database, use :class:`~django.db.models.functions.Cast` instead.
+
+``JSONNull()`` expression
+-------------------------
+
+.. versionadded:: 6.1
+
+.. class:: JSONNull()
+
+Specialized expression to represent JSON scalar ``null`` on a
+:class:`~django.db.models.JSONField`.
+
+See :ref:`storing-and-querying-for-none` for usage examples.
 
 Conditional expressions
 -----------------------

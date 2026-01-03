@@ -273,12 +273,12 @@ END;
         return value
 
     def convert_datefield_value(self, value, expression, connection):
-        if isinstance(value, Database.Timestamp):
+        if isinstance(value, datetime.datetime):
             value = value.date()
         return value
 
     def convert_timefield_value(self, value, expression, connection):
-        if isinstance(value, Database.Timestamp):
+        if isinstance(value, datetime.datetime):
             value = value.time()
         return value
 
@@ -352,7 +352,11 @@ END;
                 statement = statement.replace(
                     key, force_str(params[key], errors="replace")
                 )
-        return statement
+        return (
+            super().last_executed_query(cursor, sql, params)
+            if statement is None
+            else statement
+        )
 
     def last_insert_id(self, cursor, table_name, pk_name):
         sq_name = self._get_sequence_name(cursor, strip_quotes(table_name), pk_name)
@@ -729,3 +733,8 @@ END;
         if isinstance(expression, RawSQL) and expression.conditional:
             return True
         return False
+
+    def format_json_path_numeric_index(self, num):
+        if num < 0:
+            return "[last-%s]" % abs(num + 1)  # Indexing is zero-based.
+        return super().format_json_path_numeric_index(num)

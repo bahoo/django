@@ -76,7 +76,7 @@ General-purpose aggregation functions
 .. class:: BitXor(expression, filter=None, default=None, **extra)
 
     Returns an ``int`` of the bitwise ``XOR`` of all non-null input values, or
-    ``default`` if all values are null. It requires PostgreSQL 14+.
+    ``default`` if all values are null.
 
 ``BoolAnd``
 -----------
@@ -181,6 +181,9 @@ General-purpose aggregation functions
 .. class:: StringAgg(expression, delimiter, distinct=False, filter=None, default=None, order_by=())
 
     .. deprecated:: 6.0
+
+        The PostgreSQL ``StringAgg`` class is deprecated in favor of the
+        generally available :class:`~django.db.models.StringAgg` class.
 
     Returns the input values concatenated into a string, separated by
     the ``delimiter`` string, or ``default`` if there are no values.

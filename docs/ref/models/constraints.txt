@@ -130,7 +130,7 @@ ensures the age field is never less than 18.
 ``UniqueConstraint``
 ====================
 
-.. class:: UniqueConstraint(*expressions, fields=(), name=None, condition=None, deferrable=None, include=None, opclasses=(), nulls_distinct=None, violation_error_code=None, violation_error_message=None)
+.. class:: UniqueConstraint(*expressions, fields=(), name, condition=None, deferrable=None, include=None, opclasses=(), nulls_distinct=None, violation_error_code=None, violation_error_message=None)
 
     Creates a unique constraint in the database.
 
@@ -273,7 +273,7 @@ creates a unique constraint that only allows one row to store a ``NULL`` value
 in the ``ordering`` column.
 
 Unique constraints with ``nulls_distinct`` are ignored for databases besides
-PostgreSQL 15+.
+PostgreSQL.
 
 ``violation_error_code``
 ------------------------

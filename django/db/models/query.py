@@ -8,6 +8,7 @@ import warnings
 from contextlib import nullcontext
 from functools import reduce
 from itertools import chain, islice
+from weakref import ref as weak_ref
 
 from asgiref.sync import sync_to_async
 
@@ -26,6 +27,7 @@ from django.db.models import AutoField, DateField, DateTimeField, Field, Max, sq
 from django.db.models.constants import LOOKUP_SEP, OnConflict
 from django.db.models.deletion import Collector
 from django.db.models.expressions import Case, DatabaseDefault, F, Value, When
+from django.db.models.fetch_modes import FETCH_ONE
 from django.db.models.functions import Cast, Trunc
 from django.db.models.query_utils import FilteredRelation, Q
 from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE, ROW_COUNT
@@ -43,6 +45,8 @@ MAX_GET_RESULTS = 21
 
 # The maximum number of items to display in a QuerySet.__repr__
 REPR_OUTPUT_SIZE = 20
+
+PROHIBITED_FILTER_KWARGS = frozenset(["_connector", "_negated"])
 
 
 class BaseIterable:
@@ -86,6 +90,7 @@ class ModelIterable(BaseIterable):
         queryset = self.queryset
         db = queryset.db
         compiler = queryset.query.get_compiler(using=db)
+        fetch_mode = queryset._fetch_mode
         # Execute the query. This will also fill compiler.select, klass_info,
         # and annotations.
         results = compiler.execute_sql(
@@ -102,7 +107,7 @@ class ModelIterable(BaseIterable):
         init_list = [
             f[0].target.attname for f in select[model_fields_start:model_fields_end]
         ]
-        related_populators = get_related_populators(klass_info, select, db)
+        related_populators = get_related_populators(klass_info, select, db, fetch_mode)
         known_related_objects = [
             (
                 field,
@@ -120,10 +125,17 @@ class ModelIterable(BaseIterable):
             )
             for field, related_objs in queryset._known_related_objects.items()
         ]
+        peers = []
         for row in compiler.results_iter(results):
             obj = model_cls.from_db(
-                db, init_list, row[model_fields_start:model_fields_end]
+                db,
+                init_list,
+                row[model_fields_start:model_fields_end],
+                fetch_mode=fetch_mode,
             )
+            if fetch_mode.track_peers:
+                peers.append(weak_ref(obj))
+                obj._state.peers = peers
             for rel_populator in related_populators:
                 rel_populator.populate(row, obj)
             if annotation_col_map:
@@ -266,10 +278,17 @@ class RawModelIterable(BaseIterable):
                 query_iterator = compiler.composite_fields_to_tuples(
                     query_iterator, cols
                 )
+            fetch_mode = self.queryset._fetch_mode
+            peers = []
             for values in query_iterator:
                 # Associate fields to values
                 model_init_values = [values[pos] for pos in model_init_pos]
-                instance = model_cls.from_db(db, model_init_names, model_init_values)
+                instance = model_cls.from_db(
+                    db, model_init_names, model_init_values, fetch_mode=fetch_mode
+                )
+                if fetch_mode.track_peers:
+                    peers.append(weak_ref(instance))
+                    instance._state.peers = peers
                 if annotation_fields:
                     for column, pos in annotation_fields:
                         setattr(instance, column, values[pos])
@@ -438,6 +457,7 @@ class QuerySet(AltersData):
         self._prefetch_done = False
         self._known_related_objects = {}  # {rel_field: {pk: rel_obj}}
         self._iterable_class = ModelIterable
+        self._fetch_mode = FETCH_ONE
         self._fields = None
         self._defer_next_filter = False
         self._deferred_filter = None
@@ -810,6 +830,7 @@ class QuerySet(AltersData):
         obj = self.model(**kwargs)
         self._for_write = True
         obj.save(force_insert=True, using=self.db)
+        obj._state.fetch_mode = self._fetch_mode
         return obj
 
     create.alters_data = True
@@ -966,8 +987,7 @@ class QuerySet(AltersData):
                 )
                 for obj_with_pk, results in zip(objs_with_pk, returned_columns):
                     for result, field in zip(results, opts.db_returning_fields):
-                        if field != opts.pk:
-                            setattr(obj_with_pk, field.attname, result)
+                        setattr(obj_with_pk, field.attname, result)
                 for obj_with_pk in objs_with_pk:
                     obj_with_pk._state.adding = False
                     obj_with_pk._state.db = self.db
@@ -1464,6 +1484,8 @@ class QuerySet(AltersData):
         self._not_support_combined_queries("update")
         if self.query.is_sliced:
             raise TypeError("Cannot update a query once a slice has been taken.")
+        if self.query.distinct_fields:
+            raise TypeError("Cannot call update() after .distinct(*fields).")
         self._for_write = True
         query = self.query.chain(sql.UpdateQuery)
         query.add_update_values(kwargs)
@@ -1587,6 +1609,7 @@ class QuerySet(AltersData):
             params=params,
             translations=translations,
             using=using,
+            fetch_mode=self._fetch_mode,
         )
         qs._prefetch_related_lookups = self._prefetch_related_lookups[:]
         return qs
@@ -1620,6 +1643,18 @@ class QuerySet(AltersData):
                     "field."
                 )
             elif not fields:
+                # RemovedInDjango70Warning: When the deprecation ends, replace
+                # with:
+                # raise TypeError(
+                #     "'flat' is not valid when values_list is called with no "
+                #     "fields."
+                # )
+                warnings.warn(
+                    "Calling values_list() with no field name and flat=True "
+                    "is deprecated. Pass an explicit field name instead, like "
+                    "'pk'.",
+                    RemovedInDjango70Warning,
+                )
                 fields = [self.model._meta.concrete_fields[0].attname]
 
         field_names = {f: False for f in fields if not hasattr(f, "resolve_expression")}
@@ -1756,6 +1791,9 @@ class QuerySet(AltersData):
         return clone
 
     def _filter_or_exclude_inplace(self, negate, args, kwargs):
+        if invalid_kwargs := PROHIBITED_FILTER_KWARGS.intersection(kwargs):
+            invalid_kwargs_str = ", ".join(f"'{k}'" for k in sorted(invalid_kwargs))
+            raise TypeError(f"The following kwargs are invalid: {invalid_kwargs_str}")
         if negate:
             self._query.add_q(~Q(*args, **kwargs))
         else:
@@ -2046,6 +2084,12 @@ class QuerySet(AltersData):
         clone._db = alias
         return clone
 
+    def fetch_mode(self, fetch_mode):
+        """Set the fetch mode for the QuerySet."""
+        clone = self._chain()
+        clone._fetch_mode = fetch_mode
+        return clone
+
     ###################################
     # PUBLIC INTROSPECTION ATTRIBUTES #
     ###################################
@@ -2184,6 +2228,7 @@ class QuerySet(AltersData):
         c._prefetch_related_lookups = self._prefetch_related_lookups[:]
         c._known_related_objects = self._known_related_objects
         c._iterable_class = self._iterable_class
+        c._fetch_mode = self._fetch_mode
         c._fields = self._fields
         return c
 
@@ -2274,8 +2319,14 @@ class QuerySet(AltersData):
             raise TypeError(f"Cannot use {operator_} operator with combined queryset.")
 
     def _check_ordering_first_last_queryset_aggregation(self, method):
-        if isinstance(self.query.group_by, tuple) and not any(
-            col.output_field is self.model._meta.pk for col in self.query.group_by
+        if (
+            isinstance(self.query.group_by, tuple)
+            # Raise if the pk fields are not in the group_by.
+            and self.model._meta.pk
+            not in {col.output_field for col in self.query.group_by}
+            and set(self.model._meta.pk_fields).difference(
+                {col.target for col in self.query.group_by}
+            )
         ):
             raise TypeError(
                 f"Cannot use QuerySet.{method}() on an unordered queryset performing "
@@ -2313,6 +2364,7 @@ class RawQuerySet:
         translations=None,
         using=None,
         hints=None,
+        fetch_mode=FETCH_ONE,
     ):
         self.raw_query = raw_query
         self.model = model
@@ -2324,6 +2376,7 @@ class RawQuerySet:
         self._result_cache = None
         self._prefetch_related_lookups = ()
         self._prefetch_done = False
+        self._fetch_mode = fetch_mode
 
     def resolve_model_init_order(self):
         """Resolve the init field names and value positions."""
@@ -2422,6 +2475,7 @@ class RawQuerySet:
             params=self.params,
             translations=self.translations,
             using=alias,
+            fetch_mode=self._fetch_mode,
         )
 
     @cached_property
@@ -2885,8 +2939,9 @@ class RelatedPopulator:
     model instance.
     """
 
-    def __init__(self, klass_info, select, db):
+    def __init__(self, klass_info, select, db, fetch_mode):
         self.db = db
+        self.fetch_mode = fetch_mode
         # Pre-compute needed attributes. The attributes are:
         #  - model_cls: the possibly deferred model class to instantiate
         #  - either:
@@ -2939,7 +2994,9 @@ class RelatedPopulator:
         # relationship. Therefore checking for a single member of the primary
         # key is enough to determine if the referenced object exists or not.
         self.pk_idx = self.init_list.index(self.model_cls._meta.pk_fields[0].attname)
-        self.related_populators = get_related_populators(klass_info, select, self.db)
+        self.related_populators = get_related_populators(
+            klass_info, select, self.db, fetch_mode
+        )
         self.local_setter = klass_info["local_setter"]
         self.remote_setter = klass_info["remote_setter"]
 
@@ -2951,7 +3008,12 @@ class RelatedPopulator:
         if obj_data[self.pk_idx] is None:
             obj = None
         else:
-            obj = self.model_cls.from_db(self.db, self.init_list, obj_data)
+            obj = self.model_cls.from_db(
+                self.db,
+                self.init_list,
+                obj_data,
+                fetch_mode=self.fetch_mode,
+            )
             for rel_iter in self.related_populators:
                 rel_iter.populate(row, obj)
         self.local_setter(from_obj, obj)
@@ -2959,10 +3021,10 @@ class RelatedPopulator:
             self.remote_setter(obj, from_obj)
 
 
-def get_related_populators(klass_info, select, db):
+def get_related_populators(klass_info, select, db, fetch_mode):
     iterators = []
     related_klass_infos = klass_info.get("related_klass_infos", [])
     for rel_klass_info in related_klass_infos:
-        rel_cls = RelatedPopulator(rel_klass_info, select, db)
+        rel_cls = RelatedPopulator(rel_klass_info, select, db, fetch_mode)
         iterators.append(rel_cls)
     return iterators

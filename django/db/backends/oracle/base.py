@@ -106,6 +106,12 @@ class _UninitializedOperatorsDescriptor:
         return instance.__dict__["operators"]
 
 
+def _get_decimal_column(data):
+    if data["max_digits"] is None and data["decimal_places"] is None:
+        return "NUMBER"
+    return "NUMBER(%(max_digits)s, %(decimal_places)s)" % data
+
+
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = "oracle"
     display_name = "Oracle"
@@ -125,7 +131,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         "CharField": "NVARCHAR2(%(max_length)s)",
         "DateField": "DATE",
         "DateTimeField": "TIMESTAMP",
-        "DecimalField": "NUMBER(%(max_digits)s, %(decimal_places)s)",
+        "DecimalField": _get_decimal_column,
         "DurationField": "INTERVAL DAY(9) TO SECOND(6)",
         "FileField": "NVARCHAR2(%(max_length)s)",
         "FilePathField": "NVARCHAR2(%(max_length)s)",
@@ -433,7 +439,7 @@ class OracleParam:
                 param = 0
         if hasattr(param, "bind_parameter"):
             self.force_bytes = param.bind_parameter(cursor)
-        elif isinstance(param, (Database.Binary, datetime.timedelta)):
+        elif isinstance(param, (bytes, datetime.timedelta)):
             self.force_bytes = param
         else:
             # To transmit to the database, we need Unicode if supported

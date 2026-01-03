@@ -6,6 +6,7 @@ from django.test import TestCase, skipUnlessDBFeature
 from django.test.utils import override_settings
 from django.utils import timezone
 
+from ..utils import skipUnlessGISLookup
 from .models import Article, Author, Book, City, DirectoryEntry, Event, Location, Parcel
 
 
@@ -100,10 +101,15 @@ class RelatedGeoModelTest(TestCase):
         self.assertEqual(type(u3), MultiPoint)
 
         # Ordering of points in the result of the union is not defined and
-        # implementation-dependent (DB backend, GEOS version)
-        self.assertEqual({p.ewkt for p in ref_u1}, {p.ewkt for p in u1})
-        self.assertEqual({p.ewkt for p in ref_u2}, {p.ewkt for p in u2})
-        self.assertEqual({p.ewkt for p in ref_u1}, {p.ewkt for p in u3})
+        # implementation-dependent (DB backend, GEOS version).
+        tests = [
+            (u1, ref_u1),
+            (u2, ref_u2),
+            (u3, ref_u1),
+        ]
+        for union, ref in tests:
+            for point, ref_point in zip(sorted(union), sorted(ref), strict=True):
+                self.assertIs(point.equals_exact(ref_point, tolerance=6), True)
 
     def test05_select_related_fk_to_subclass(self):
         """
@@ -112,6 +118,7 @@ class RelatedGeoModelTest(TestCase):
         # Regression test for #9752.
         list(DirectoryEntry.objects.select_related())
 
+    @skipUnlessGISLookup("within")
     def test06_f_expressions(self):
         "Testing F() expressions on GeometryFields."
         # Constructing a dummy parcel border and getting the City instance for
@@ -224,6 +231,7 @@ class RelatedGeoModelTest(TestCase):
             self.assertEqual(val_dict["id"], c_id)
             self.assertEqual(val_dict["location__id"], l_id)
 
+    @skipUnlessGISLookup("within")
     def test10_combine(self):
         "Testing the combination of two QuerySets (#10807)."
         buf1 = City.objects.get(name="Aurora").location.point.buffer(0.1)

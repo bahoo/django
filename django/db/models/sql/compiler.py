@@ -1609,9 +1609,9 @@ class SQLCompiler:
 
         for row in results:
             if converters:
-                row = self.apply_converters((row,), converters)[0]
+                row = next(self.apply_converters((row,), converters))
             if has_composite:
-                row = self.composite_fields_to_tuples((row,), fields)[0]
+                row = next(self.composite_fields_to_tuples((row,), fields))
             if tuple_expected:
                 row = tuple(row)
             yield row

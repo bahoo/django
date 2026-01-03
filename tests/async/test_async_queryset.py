@@ -6,7 +6,12 @@ from asgiref.sync import async_to_sync, sync_to_async
 
 from django.db import NotSupportedError, connection
 from django.db.models import Prefetch, Sum
-from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
+from django.test import (
+    TestCase,
+    TransactionTestCase,
+    skipIfDBFeature,
+    skipUnlessDBFeature,
+)
 
 from .models import RelatedModel, SimpleModel
 
@@ -42,21 +47,6 @@ class AsyncQuerySetTest(TestCase):
         async for m in SimpleModel.objects.order_by("pk"):
             results.append(m)
         self.assertEqual(results, [self.s1, self.s2, self.s3])
-
-    async def test_aiterator(self):
-        qs = SimpleModel.objects.aiterator()
-        results = []
-        async for m in qs:
-            results.append(m)
-        self.assertCountEqual(results, [self.s1, self.s2, self.s3])
-
-    async def test_aiterator_prefetch_related(self):
-        results = []
-        async for s in SimpleModel.objects.prefetch_related(
-            Prefetch("relatedmodel_set", to_attr="prefetched_relatedmodel")
-        ).aiterator():
-            results.append(s.prefetched_relatedmodel)
-        self.assertCountEqual(results, [[self.r1], [self.r2], [self.r3]])
 
     async def test_aiterator_invalid_chunk_size(self):
         msg = "Chunk size must be strictly positive."
@@ -257,3 +247,44 @@ class AsyncQuerySetTest(TestCase):
         sql = "SELECT id, field FROM async_simplemodel WHERE created=%s"
         qs = SimpleModel.objects.raw(sql, [self.s1.created])
         self.assertEqual([o async for o in qs], [self.s1])
+
+
+@skipUnlessDBFeature("supports_async")
+class AsyncIteratorTests(TransactionTestCase):
+    """
+    Tests for aiterator() that use native async cursors.
+
+    These tests use TransactionTestCase because native async cursors require
+    data to be committed and visible to the async database connection. The
+    async connection is separate from the sync connection used by TestCase's
+    transaction wrapping, so data created within a TestCase transaction is
+    not visible to async cursors.
+    """
+
+    available_apps = ["async"]
+
+    async def test_aiterator(self):
+        """Test basic aiterator functionality with native async cursors."""
+        s1 = await SimpleModel.objects.acreate(field=100, created=datetime(2022, 1, 1))
+        s2 = await SimpleModel.objects.acreate(field=101, created=datetime(2022, 1, 2))
+        s3 = await SimpleModel.objects.acreate(field=102, created=datetime(2022, 1, 3))
+        qs = SimpleModel.objects.filter(field__gte=100).aiterator()
+        results = []
+        async for m in qs:
+            results.append(m)
+        self.assertCountEqual(results, [s1, s2, s3])
+
+    async def test_aiterator_prefetch_related(self):
+        """Test aiterator with prefetch_related using native async cursors."""
+        s1 = await SimpleModel.objects.acreate(field=200, created=datetime(2022, 1, 1))
+        s2 = await SimpleModel.objects.acreate(field=201, created=datetime(2022, 1, 2))
+        s3 = await SimpleModel.objects.acreate(field=202, created=datetime(2022, 1, 3))
+        r1 = await RelatedModel.objects.acreate(simple=s1)
+        r2 = await RelatedModel.objects.acreate(simple=s2)
+        r3 = await RelatedModel.objects.acreate(simple=s3)
+        results = []
+        async for s in SimpleModel.objects.filter(field__gte=200).prefetch_related(
+            Prefetch("relatedmodel_set", to_attr="prefetched_relatedmodel")
+        ).aiterator():
+            results.append(s.prefetched_relatedmodel)
+        self.assertCountEqual(results, [[r1], [r2], [r3]])

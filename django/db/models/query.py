@@ -154,21 +154,6 @@ class ModelIterable(BaseIterable):
         """
         queryset = self.queryset
         db = queryset.db
-
-        # Check if the sync connection is in an atomic block. We need to use
-        # sync_to_async because the connection object is thread-local, and we
-        # need to check the state from the sync thread, not the async thread.
-        # If we're in an atomic block (transaction), we must use the sync_to_async
-        # fallback because the async connection (aconnection) is separate from
-        # the sync connection and can't see uncommitted transaction data.
-        def _check_in_atomic():
-            return connections[db].in_atomic_block
-
-        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
-            async for item in self._async_generator():
-                yield item
-            return
-
         compiler = queryset.query.get_compiler(using=db)
 
         # Execute the query asynchronously. This will also fill compiler.select,
@@ -324,16 +309,6 @@ class ValuesIterable(BaseIterable):
         """Asynchronous iterator that yields dicts using async cursors."""
         queryset = self.queryset
         db = queryset.db
-
-        # Check if the sync connection is in an atomic block (see ModelIterable).
-        def _check_in_atomic():
-            return connections[db].in_atomic_block
-
-        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
-            async for item in self._async_generator():
-                yield item
-            return
-
         query = queryset.query
         compiler = query.get_compiler(db)
 
@@ -372,16 +347,6 @@ class ValuesListIterable(BaseIterable):
         """Asynchronous iterator that yields tuples using async cursors."""
         queryset = self.queryset
         db = queryset.db
-
-        # Check if the sync connection is in an atomic block (see ModelIterable).
-        def _check_in_atomic():
-            return connections[db].in_atomic_block
-
-        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
-            async for item in self._async_generator():
-                yield item
-            return
-
         query = queryset.query
         compiler = query.get_compiler(db)
         async for row in compiler.aresults_iter(
@@ -451,16 +416,6 @@ class FlatValuesListIterable(BaseIterable):
         """Asynchronous iterator that yields single values using async cursors."""
         queryset = self.queryset
         db = queryset.db
-
-        # Check if the sync connection is in an atomic block (see ModelIterable).
-        def _check_in_atomic():
-            return connections[db].in_atomic_block
-
-        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
-            async for item in self._async_generator():
-                yield item
-            return
-
         compiler = queryset.query.get_compiler(db)
         async for row in compiler.aresults_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size

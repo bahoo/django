@@ -72,11 +72,9 @@ class BaseIterable:
     # __aiter__() is a *synchronous* method that has to then return an
     # *asynchronous* iterator/generator. Thus, nest an async generator inside
     # it.
-    # This is a generic iterable converter for now, and is going to suffer a
-    # performance penalty on large sets of items due to the cost of crossing
-    # over the sync barrier for each chunk. Custom __aiter__() methods should
-    # be added to each Iterable subclass, but that needs some work in the
-    # Compiler first.
+    # This is a generic fallback that uses sync_to_async. The main Iterable
+    # subclasses (ModelIterable, ValuesIterable, etc.) now have native async
+    # __aiter__() methods that use async cursors for true non-blocking iteration.
     def __aiter__(self):
         return self._async_generator()
 
@@ -128,6 +126,106 @@ class ModelIterable(BaseIterable):
             )
             for rel_populator in related_populators:
                 rel_populator.populate(row, obj)
+            if annotation_col_map:
+                for attr_name, col_pos in annotation_col_map.items():
+                    setattr(obj, attr_name, row[col_pos])
+
+            # Add the known related objects to the model.
+            for field, rel_objs, rel_getter in known_related_objects:
+                # Avoid overwriting objects loaded by, e.g., select_related().
+                if field.is_cached(obj):
+                    continue
+                rel_obj_id = rel_getter(obj)
+                try:
+                    rel_obj = rel_objs[rel_obj_id]
+                except KeyError:
+                    pass  # May happen in qs1 | qs2 scenarios.
+                else:
+                    setattr(obj, field.name, rel_obj)
+
+            yield obj
+
+    async def __aiter__(self):
+        """
+        Asynchronous iterator that yields model instances using async cursors.
+
+        This provides true non-blocking async iteration, properly supporting
+        select_related() with JOINs without blocking the event loop.
+        """
+        queryset = self.queryset
+        db = queryset.db
+
+        # Check if the sync connection is in an atomic block. We need to use
+        # sync_to_async because the connection object is thread-local, and we
+        # need to check the state from the sync thread, not the async thread.
+        # If we're in an atomic block (transaction), we must use the sync_to_async
+        # fallback because the async connection (aconnection) is separate from
+        # the sync connection and can't see uncommitted transaction data.
+        def _check_in_atomic():
+            return connections[db].in_atomic_block
+
+        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
+            async for item in self._async_generator():
+                yield item
+            return
+
+        compiler = queryset.query.get_compiler(using=db)
+
+        # Execute the query asynchronously. This will also fill compiler.select,
+        # klass_info, and annotations.
+        results = await compiler.aexecute_sql(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        )
+
+        if results is None:
+            return
+
+        select, klass_info, annotation_col_map = (
+            compiler.select,
+            compiler.klass_info,
+            compiler.annotation_col_map,
+        )
+        model_cls = klass_info["model"]
+        select_fields = klass_info["select_fields"]
+        model_fields_start, model_fields_end = select_fields[0], select_fields[-1] + 1
+        init_list = [
+            f[0].target.attname for f in select[model_fields_start:model_fields_end]
+        ]
+        related_populators = get_related_populators(klass_info, select, db)
+        known_related_objects = [
+            (
+                field,
+                related_objs,
+                operator.attrgetter(
+                    *[
+                        (
+                            field.attname
+                            if from_field == "self"
+                            else queryset.model._meta.get_field(from_field).attname
+                        )
+                        for from_field in field.from_fields
+                    ]
+                ),
+            )
+            for field, related_objs in queryset._known_related_objects.items()
+        ]
+
+        # Apply converters if needed
+        fields = [s[0] for s in select[0 : compiler.col_count]]
+        converters = compiler.get_converters(fields)
+
+        for row in results:
+            if converters:
+                row = compiler.apply_converters((row,), converters)[0]
+
+            obj = model_cls.from_db(
+                db, init_list, row[model_fields_start:model_fields_end]
+            )
+
+            # Populate related objects (from select_related)
+            for rel_populator in related_populators:
+                rel_populator.populate(row, obj)
+
             if annotation_col_map:
                 for attr_name, col_pos in annotation_col_map.items():
                     setattr(obj, attr_name, row[col_pos])
@@ -222,6 +320,37 @@ class ValuesIterable(BaseIterable):
         ):
             yield {names[i]: row[i] for i in indexes}
 
+    async def __aiter__(self):
+        """Asynchronous iterator that yields dicts using async cursors."""
+        queryset = self.queryset
+        db = queryset.db
+
+        # Check if the sync connection is in an atomic block (see ModelIterable).
+        def _check_in_atomic():
+            return connections[db].in_atomic_block
+
+        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
+            async for item in self._async_generator():
+                yield item
+            return
+
+        query = queryset.query
+        compiler = query.get_compiler(db)
+
+        if query.selected:
+            names = list(query.selected)
+        else:
+            names = [
+                *query.extra_select,
+                *query.values_select,
+                *query.annotation_select,
+            ]
+        indexes = range(len(names))
+        async for row in compiler.aresults_iter(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        ):
+            yield {names[i]: row[i] for i in indexes}
+
 
 class ValuesListIterable(BaseIterable):
     """
@@ -238,6 +367,29 @@ class ValuesListIterable(BaseIterable):
             chunked_fetch=self.chunked_fetch,
             chunk_size=self.chunk_size,
         )
+
+    async def __aiter__(self):
+        """Asynchronous iterator that yields tuples using async cursors."""
+        queryset = self.queryset
+        db = queryset.db
+
+        # Check if the sync connection is in an atomic block (see ModelIterable).
+        def _check_in_atomic():
+            return connections[db].in_atomic_block
+
+        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
+            async for item in self._async_generator():
+                yield item
+            return
+
+        query = queryset.query
+        compiler = query.get_compiler(db)
+        async for row in compiler.aresults_iter(
+            tuple_expected=True,
+            chunked_fetch=self.chunked_fetch,
+            chunk_size=self.chunk_size,
+        ):
+            yield row
 
 
 class NamedValuesListIterable(ValuesListIterable):
@@ -262,6 +414,24 @@ class NamedValuesListIterable(ValuesListIterable):
         for row in super().__iter__():
             yield new(tuple_class, row)
 
+    async def __aiter__(self):
+        """Asynchronous iterator that yields namedtuples using async cursors."""
+        queryset = self.queryset
+        if queryset._fields:
+            names = queryset._fields
+        else:
+            query = queryset.query
+            names = [
+                *query.extra_select,
+                *query.values_select,
+                *query.annotation_select,
+            ]
+        tuple_class = create_namedtuple_class(*names)
+        new = tuple.__new__
+        # Use the parent's async iterator
+        async for row in super().__aiter__():
+            yield new(tuple_class, row)
+
 
 class FlatValuesListIterable(BaseIterable):
     """
@@ -273,6 +443,26 @@ class FlatValuesListIterable(BaseIterable):
         queryset = self.queryset
         compiler = queryset.query.get_compiler(queryset.db)
         for row in compiler.results_iter(
+            chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
+        ):
+            yield row[0]
+
+    async def __aiter__(self):
+        """Asynchronous iterator that yields single values using async cursors."""
+        queryset = self.queryset
+        db = queryset.db
+
+        # Check if the sync connection is in an atomic block (see ModelIterable).
+        def _check_in_atomic():
+            return connections[db].in_atomic_block
+
+        if await sync_to_async(_check_in_atomic, thread_sensitive=True)():
+            async for item in self._async_generator():
+                yield item
+            return
+
+        compiler = queryset.query.get_compiler(db)
+        async for row in compiler.aresults_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
         ):
             yield row[0]

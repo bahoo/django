@@ -952,6 +952,13 @@ class BaseDatabaseWrapper:
         """
         return self.cursor()
 
+    async def achunked_cursor(self):
+        """
+        Return an async cursor that tries to avoid caching in the database (if
+        supported by the database), otherwise return a regular async cursor.
+        """
+        return self.acursor()
+
     def make_debug_cursor(self, cursor):
         """Create a cursor that logs all queries in self.queries_log."""
         return utils.CursorDebugWrapper(cursor, self)

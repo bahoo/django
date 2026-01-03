@@ -1584,6 +1584,38 @@ class SQLCompiler:
             rows = map(tuple, rows)
         return rows
 
+    async def aresults_iter(
+        self,
+        results=None,
+        tuple_expected=False,
+        chunked_fetch=False,
+        chunk_size=GET_ITERATOR_CHUNK_SIZE,
+    ):
+        """
+        Asynchronous version of results_iter().
+
+        Return an async iterator over the results from executing this query.
+        """
+        if results is None:
+            results = await self.aexecute_sql(
+                MULTI, chunked_fetch=chunked_fetch, chunk_size=chunk_size
+            )
+        if results is None:
+            return
+
+        fields = [s[0] for s in self.select[0 : self.col_count]]
+        converters = self.get_converters(fields)
+        has_composite = self.has_composite_fields(fields)
+
+        for row in results:
+            if converters:
+                row = self.apply_converters((row,), converters)[0]
+            if has_composite:
+                row = self.composite_fields_to_tuples((row,), fields)[0]
+            if tuple_expected:
+                row = tuple(row)
+            yield row
+
     def has_results(self):
         """
         Backends (e.g. NoSQL) can override this in order to use optimized
@@ -1661,6 +1693,79 @@ class SQLCompiler:
             # unless the database doesn't support it.
             return list(result)
         return result
+
+    async def aexecute_sql(
+        self, result_type=MULTI, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE
+    ):
+        """
+        Asynchronous version of execute_sql().
+
+        Run the query against the database using async cursors and return the
+        result(s). The return value depends on the value of result_type.
+
+        When result_type is:
+        - MULTI: Retrieves all rows using afetchall() or afetchmany() for chunked.
+        - SINGLE: Retrieves a single row using afetchone().
+        - ROW_COUNT: Retrieves the number of rows in the result.
+        - CURSOR: Not supported in async mode - raises NotSupportedError.
+        - NO_RESULTS: Returns None.
+        """
+        result_type = result_type or NO_RESULTS
+        try:
+            sql, params = self.as_sql()
+            if not sql:
+                raise EmptyResultSet
+        except EmptyResultSet:
+            if result_type == MULTI:
+                return iter([])
+            else:
+                return
+
+        if result_type == CURSOR:
+            raise NotSupportedError(
+                "CURSOR result_type is not supported in async mode. "
+                "Use MULTI or SINGLE instead."
+            )
+
+        # Use async cursor context manager
+        # Note: We always use acursor() here since we're collecting all results
+        # into memory anyway. Server-side cursors (achunked_cursor) are only
+        # beneficial when streaming results, which requires different handling.
+        async with self.connection.acursor() as cursor:
+            await cursor.aexecute(sql, params)
+
+            if result_type == ROW_COUNT:
+                return cursor.rowcount
+
+            if result_type == SINGLE:
+                val = await cursor.afetchone()
+                if val:
+                    return val[0 : self.col_count]
+                return val
+
+            if result_type == NO_RESULTS:
+                return
+
+            # result_type == MULTI
+            col_count = self.col_count if self.has_extra_select else None
+
+            if not chunked_fetch or not self.connection.features.can_use_chunked_reads:
+                # Fetch all results at once
+                rows = await cursor.afetchall()
+                if col_count is not None:
+                    rows = [r[:col_count] for r in rows]
+                return rows
+
+            # Chunked fetch - collect all chunks
+            all_rows = []
+            while True:
+                rows = await cursor.afetchmany(chunk_size)
+                if not rows:
+                    break
+                if col_count is not None:
+                    rows = [r[:col_count] for r in rows]
+                all_rows.extend(rows)
+            return all_rows
 
     def explain_query(self):
         result = list(self.execute_sql())
